@@ -31,26 +31,33 @@ class Dreamer(nn.Module):
         super(Dreamer, self).__init__()
         self._config = config
         self._logger = logger
+
         self._should_log = tools.Every(config.log_every)
         self._should_train = tools.Every(config.train_every)
-        self._should_pretrain = tools.Once()
+        self._should_pretrain = tools.Once()  # 1回しかtrueを返さない
         self._should_reset = tools.Every(config.reset_every)
         self._should_expl = tools.Until(int(
             config.expl_until / config.action_repeat))
+
         self._metrics = {}
-        self._step = count_steps(config.traindir)
-        # Schedules.
+        self._step = count_steps(config.traindir)  # たぶん0から
+
+        # Schedules. (時間につれ値を変化させていく ex) linear -> 線形に) or 固定値
         config.actor_entropy = (
             lambda x=config.actor_entropy: tools.schedule(x, self._step))
         config.actor_state_entropy = (
             lambda x=config.actor_state_entropy: tools.schedule(x, self._step))
         config.imag_gradient_mix = (
             lambda x=config.imag_gradient_mix: tools.schedule(x, self._step))
+
         self._dataset = dataset
+
         self._wm = models.WorldModel(self._step, config)
+
         self._task_behavior = models.ImagBehavior(
             config, self._wm, config.behavior_stop_grad)
-        reward = lambda f, s, a: self._wm.heads['reward'](f).mean
+
+        def reward(f, s, a): return self._wm.heads['reward'](f).mean
         self._expl_behavior = dict(
             greedy=lambda: self._task_behavior,
             random=lambda: expl.Random(config),
@@ -216,6 +223,7 @@ def process_episode(config, logger, mode, train_eps, eval_eps, episode):
                 del cache[key]
         logger.scalar('dataset_size', total + length)
     cache[str(filename)] = episode
+
     print(f'{mode.title()} episode has {length} steps and return {score:.1f}.')
     logger.scalar(f'{mode}_return', score)
     logger.scalar(f'{mode}_length', length)
@@ -244,8 +252,8 @@ def main(config):
     config.evaldir.mkdir(parents=True, exist_ok=True)
 
     # 続きから続行できるように
-    step = count_steps(config.traindir) # folderでstepをカウント？
-    logger = tools.Logger(logdir, config.action_repeat * step)  #ここでstepをすでに保存？
+    step = count_steps(config.traindir)  # folderでstepをカウント？
+    logger = tools.Logger(logdir, config.action_repeat * step)  # ここでstepをすでに保存？
 
     print('Create envs.')
     if config.offline_traindir:
@@ -293,33 +301,57 @@ def main(config):
 
         tools.simulate(random_agent, train_envs, prefill)
         tools.simulate(random_agent, eval_envs, episodes=1)
+
         logger.step = config.action_repeat * count_steps(config.traindir)
 
     print('Simulate agent.')
-    train_dataset = make_dataset(train_eps, config)
+    train_dataset = make_dataset(train_eps, config)  # todo train_epsは保存されたデータだけでは？
     eval_dataset = make_dataset(eval_eps, config)
+
     agent = Dreamer(config, logger, train_dataset).to(config.device)
-    agent.requires_grad_(requires_grad=False)
+    agent.requires_grad_(requires_grad=False)  # todo どうして？
+
+
+    print(agent._wm)
+    exit()
+
+
     if (logdir / 'latest_model.pt').exists():
         agent.load_state_dict(torch.load(logdir / 'latest_model.pt'))
-        agent._should_pretrain._once = False
+        agent._should_pretrain._once = False  # todo Onceインスタンスが失われてしまうのでは？
 
+    # Simulate and Learning?
     state = None
     while agent._step < config.steps:
         logger.write()
+
+        # Evaluation
         print('Start evaluation.')
+
         video_pred = agent._wm.video_pred(next(eval_dataset))
         logger.video('eval_openl', to_np(video_pred))
+
         eval_policy = functools.partial(agent, training=False)
+
         tools.simulate(eval_policy, eval_envs, episodes=1)
+
+        # Training
         print('Start training.')
+
         state = tools.simulate(agent, train_envs, config.eval_every, state=state)
+
         torch.save(agent.state_dict(), logdir / 'latest_model.pt')
+
+    # Destroy()
     for env in train_envs + eval_envs:
         try:
             env.close()
         except Exception:
             pass
+
+    # todo 今後 Dreamer -> WorldModel -> RSSM (逐次toolsやconfigを読む)
+    # ~~_everyは見習った方がいいかも
+    # dataを集めるのをsimulateひとつでできるのは参考にする？
 
 
 if __name__ == '__main__':

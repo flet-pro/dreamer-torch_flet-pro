@@ -13,16 +13,18 @@ class WorldModel(nn.Module):
 
     def __init__(self, step, config):
         super(WorldModel, self).__init__()
-        self._step = step
-        self._use_amp = True if config.precision == 16 else False
+        self._step = step  # 学習済みstep?の取得
+        self._use_amp = True if config.precision == 16 else False  # todo what is amp meaning? True for default
         self._config = config
+
         self.encoder = networks.ConvEncoder(config.grayscale,
                                             config.cnn_depth, config.act, config.encoder_kernels)
         if config.size[0] == 64 and config.size[1] == 64:
-            embed_size = 2 ** (len(config.encoder_kernels) - 1) * config.cnn_depth
-            embed_size *= 2 * 2
+            embed_size = 2 ** (len(config.encoder_kernels) - 1) * config.cnn_depth  # last layer's output channels
+            embed_size *= 2 * 2  # (64, 64) -> (2, 2) by cnn kernels and stride??
         else:
             raise NotImplemented(f"{config.size} is not applicable now")
+
         self.dynamics = networks.RSSM(
             config.dyn_stoch, config.dyn_deter, config.dyn_hidden,
             config.dyn_input_layers, config.dyn_output_layers,
@@ -30,13 +32,17 @@ class WorldModel(nn.Module):
             config.act, config.dyn_mean_act, config.dyn_std_act,
             config.dyn_temp_post, config.dyn_min_std, config.dyn_cell,
             config.num_actions, embed_size, config.device)
+
         self.heads = nn.ModuleDict()
+
         channels = (1 if config.grayscale else 3)
-        shape = (channels,) + config.size
+        shape = (channels,) + config.size  # (3, 64, 64)
+
         if config.dyn_discrete:
-            feat_size = config.dyn_stoch * config.dyn_discrete + config.dyn_deter
+            feat_size = config.dyn_stoch * config.dyn_discrete + config.dyn_deter  # todo なぜstochが増える？
         else:
             feat_size = config.dyn_stoch + config.dyn_deter
+
         self.heads['image'] = networks.ConvDecoder(
             feat_size,  # pytorch version
             config.cnn_depth, config.act, shape, config.decoder_kernels,
@@ -44,16 +50,20 @@ class WorldModel(nn.Module):
         self.heads['reward'] = networks.DenseHead(
             feat_size,  # pytorch version
             [], config.reward_layers, config.units, config.act)
+
         if config.pred_discount:
             self.heads['discount'] = networks.DenseHead(
                 feat_size,  # pytorch version
                 [], config.discount_layers, config.units, config.act, dist='binary')
+
         for name in config.grad_heads:
             assert name in self.heads, name
+
         self._model_opt = tools.Optimizer(
             'model', self.parameters(), config.model_lr, config.opt_eps, config.grad_clip,
             config.weight_decay, opt=config.opt,
             use_amp=self._use_amp)
+
         self._scales = dict(
             reward=config.reward_scale, discount=config.discount_scale)
 

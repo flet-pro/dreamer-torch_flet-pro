@@ -123,6 +123,7 @@ def simulate(agent, envs, steps=0, episodes=0, state=None):
         reward = [0] * len(envs)
     else:
         step, episode, done, length, obs, agent_state, reward = state
+
     while (steps and step < steps) or (episodes and episode < episodes):
         # Reset envs if necessary.
         if done.any():
@@ -131,16 +132,18 @@ def simulate(agent, envs, steps=0, episodes=0, state=None):
             for index, result in zip(indices, results):
                 obs[index] = result
             reward = [reward[i] * (1 - done[i]) for i in range(len(envs))]
+
         # Step agents.
         obs = {k: np.stack([o[k] for o in obs]) for k in obs[0]}
         action, agent_state = agent(obs, done, agent_state, reward)
         if isinstance(action, dict):
             action = [
-                {k: np.array(action[k][i].detach().cpu()) for k in action}
+                {k: np.array(action[k][i].detach().cpu()) for k in action}  # cpuに下ろしている
                 for i in range(len(envs))]
         else:
             action = np.array(action)
         assert len(action) == len(envs)
+
         # Step envs.
         results = [e.step(a) for e, a in zip(envs, action)]
         obs, reward, done = zip(*[p[:3] for p in results])
@@ -214,15 +217,16 @@ def load_episodes(directory, limit=None, reverse=True):
             try:
                 with filename.open('rb') as f:
                     episode = np.load(f)
+                    # todo rewardとかの形見る時用
                     # print(type(episode))
                     # print(type(episode.keys()))
                     # print(list(episode.keys()))
-                    episode = {k: episode[k] for k in episode.keys()}
-                    # print(episode)
+                    # print("\n------------------------------------------------------------------")
 
-                    # print(episode["orientations"].shape)
-                    # print(episode["height"].shape)
-                    # print(episode["reward"].shape)
+                    episode = {k: episode[k] for k in episode.keys()}
+
+                    # for k in episode.keys():
+                    #     print("{}: {} / {}\n".format(k, episode[k].shape, episode[k][0]))
                     # exit()
             except Exception as e:
                 print(f'Could not load episode: {e}')
@@ -637,20 +641,24 @@ def schedule(string, step):
         if match:
             initial, final, duration = [float(group) for group in match.groups()]
             mix = torch.clip(torch.Tensor([step / duration]), 0, 1)[0]
-            return (1 - mix) * initial + mix * final
+            return (1 - mix) * initial + mix * final  # initialからmix分の位置
+
         match = re.match(r'warmup\((.+),(.+)\)', string)
         if match:
             warmup, value = [float(group) for group in match.groups()]
             scale = torch.clip(step / warmup, 0, 1)
             return scale * value
+
         match = re.match(r'exp\((.+),(.+),(.+)\)', string)
         if match:
             initial, final, halflife = [float(group) for group in match.groups()]
             return (initial - final) * 0.5 ** (step / halflife) + final
+
         match = re.match(r'horizon\((.+),(.+),(.+)\)', string)
         if match:
             initial, final, duration = [float(group) for group in match.groups()]
             mix = torch.clip(step / duration, 0, 1)
             horizon = (1 - mix) * initial + mix * final
             return 1 - 1 / horizon
+
         raise NotImplementedError(string)

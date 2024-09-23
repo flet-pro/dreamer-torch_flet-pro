@@ -33,6 +33,7 @@ class RSSM(nn.Module):
         self._embed = embed
         self._device = device
 
+        # inp_layers: stoch + n_actions (+embed) -> hidden
         inp_layers = []
         if self._discrete:
             inp_dim = self._stoch * self._discrete + num_actions
@@ -40,6 +41,7 @@ class RSSM(nn.Module):
             inp_dim = self._stoch + num_actions
         if self._shared:
             inp_dim += self._embed
+
         for i in range(self._layers_input):
             inp_layers.append(nn.Linear(inp_dim, self._hidden))
             inp_layers.append(self._act())
@@ -47,6 +49,7 @@ class RSSM(nn.Module):
                 inp_dim = self._hidden
         self._inp_layers = nn.Sequential(*inp_layers)
 
+        # GRU
         if cell == 'gru':
             self._cell = GRUCell(self._hidden, self._deter)
         elif cell == 'gru_layer_norm':
@@ -54,6 +57,7 @@ class RSSM(nn.Module):
         else:
             raise NotImplementedError(cell)
 
+        # img_out_layer: deter -> hidden
         img_out_layers = []
         inp_dim = self._deter
         for i in range(self._layers_output):
@@ -63,11 +67,13 @@ class RSSM(nn.Module):
                 inp_dim = self._hidden
         self._img_out_layers = nn.Sequential(*img_out_layers)
 
+        # obs_out_layer: deter + embed -> hidden
         obs_out_layers = []
         if self._temp_post:
             inp_dim = self._deter + self._embed
         else:
             inp_dim = self._embed
+
         for i in range(self._layers_output):
             obs_out_layers.append(nn.Linear(inp_dim, self._hidden))
             obs_out_layers.append(self._act())
@@ -75,6 +81,7 @@ class RSSM(nn.Module):
                 inp_dim = self._hidden
         self._obs_out_layers = nn.Sequential(*obs_out_layers)
 
+        # ims_state_layer, obs_stat_layer: hidden -> 2 * stoch
         if self._discrete:
             self._ims_stat_layer = nn.Linear(self._hidden, self._stoch * self._discrete)
             self._obs_stat_layer = nn.Linear(self._hidden, self._stoch * self._discrete)
