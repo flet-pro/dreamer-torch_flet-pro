@@ -98,16 +98,26 @@ class RSSM(nn.Module):
         return state
 
     def observe(self, embed, action, state=None):
+        # return post and prior from obs_step amd img_step
+        # print(embed.shape) # torch.Size([50, 50, 1024])
+        # print(action.shape) torch.Size([50, 50, 6])
+
         swap = lambda x: x.permute([1, 0] + list(range(2, len(x.shape))))
         if state is None:
-            state = self.initial(action.shape[0])
-        embed, action = swap(embed), swap(action)
+            state = self.initial(action.shape[0])  # state has keys of "mean, std, stoch, deter"
+        embed, action = swap(embed), swap(action)  # batch_length * batch_size
+
         post, prior = tools.static_scan(
             lambda prev_state, prev_act, embed: self.obs_step(
                 prev_state[0], prev_act, embed),
-            (action, embed), (state, state))
-        post = {k: swap(v) for k, v in post.items()}
+            (action, embed), (state, state))  # prior, post : Dict
+
+        # print(post.keys()) dict_keys(['stoch', 'deter', 'mean', 'std'])
+        # print(prior.keys()) dict_keys(['stoch', 'deter', 'mean', 'std'])
+
+        post = {k: swap(v) for k, v in post.items()}  # swap -> batch_size * batch_length
         prior = {k: swap(v) for k, v in prior.items()}
+        # print(post["stoch"].size())
         return post, prior
 
     def imagine(self, action, state=None):
@@ -133,28 +143,36 @@ class RSSM(nn.Module):
         if self._discrete:
             logit = state['logit']
             dist = torchd.independent.Independent(tools.OneHotDist(logit), 1)
+            # !!! Categorical Dist -> Algorithm 1
         else:
             mean, std = state['mean'], state['std']
             dist = tools.ContDist(torchd.independent.Independent(
                 torchd.normal.Normal(mean, std), 1))
+            # return diagonal gaussian dist
+            # print(dist._dist.batch_shape)  # 6 -> 1 -> 50 = batch_size
+            # print(dist._dist.event_shape)  # 50 <- stoch
         return dist
 
     def obs_step(self, prev_state, prev_action, embed, sample=True):
         prior = self.img_step(prev_state, prev_action, None, sample)
-        if self._shared:
+
+        if self._shared:  # False # todo shared = the embed is shared??
             post = self.img_step(prev_state, prev_action, embed, sample)
         else:
-            if self._temp_post:
+            if self._temp_post: # True
                 x = torch.cat([prior['deter'], embed], -1)
             else:
                 x = embed
-            x = self._obs_out_layers(x)
-            stats = self._suff_stats_layer('obs', x)
+
+            x = self._obs_out_layers(x)  # Representation Model(z_t)
+
+            stats = self._suff_stats_layer('obs', x)  # to 2 * stoch
             if sample:
                 stoch = self.get_dist(stats).sample()
             else:
                 stoch = self.get_dist(stats).mode()
             post = {'stoch': stoch, 'deter': prior['deter'], **stats}
+
         return post, prior
 
     def img_step(self, prev_state, prev_action, embed=None, sample=True):
@@ -168,20 +186,28 @@ class RSSM(nn.Module):
                 embed = torch.zeros(shape)
             x = torch.cat([prev_stoch, prev_action, embed], -1)
         else:
-            x = torch.cat([prev_stoch, prev_action], -1)
-        x = self._inp_layers(x)
+            x = torch.cat([prev_stoch, prev_action], -1)  # dmc
+
+        x = self._inp_layers(x)  # dmc  # todo connect action and stoch ?? (1 layer with activation)
+
         for _ in range(self._rec_depth):  # rec depth is not correctly implemented
+            # todo rec_depth = record depth?? -> maybe the num_layer of gru
             deter = prev_state['deter']
             x, deter = self._cell(x, [deter])
-            deter = deter[0]  # Keras wraps the state in a list.
-        x = self._img_out_layers(x)
-        stats = self._suff_stats_layer('ims', x)
+            # gru cell = linear(400 -> 600) -> layer_norm(600 (-> 600)) -> 200, 200, 200 = w_r(reset), w_z(update), w_h
+            deter = deter[0]  # Keras wraps the state in a list. do not care
+
+        x = self._img_out_layers(x)  # deter to hidden=z_hat_t -> Transition Predictor
+
+        stats = self._suff_stats_layer('ims', x)  # to 2 * stoch (stoch = 32 for atari, 50 for dmc)
+
         if sample:
             stoch = self.get_dist(stats).sample()
         else:
             stoch = self.get_dist(stats).mode()
+
         prior = {'stoch': stoch, 'deter': deter, **stats}
-        return prior
+        return prior  # todo got prior?
 
     def _suff_stats_layer(self, name, x):
         if self._discrete:
@@ -216,21 +242,27 @@ class RSSM(nn.Module):
 
     def kl_loss(self, post, prior, forward, balance, free, scale):
         kld = torchd.kl.kl_divergence
-        dist = lambda x: self.get_dist(x)
+        dist = lambda x: self.get_dist(x)  # get mean and std from post and prior dict
         sg = lambda x: {k: v.detach() for k, v in x.items()}
-        lhs, rhs = (prior, post) if forward else (post, prior)
+
+        lhs, rhs = (prior, post) if forward else (post, prior)  # False, lhs = left hand side
         mix = balance if forward else (1 - balance)
         if balance == 0.5:
             value = kld(dist(lhs) if self._discrete else dist(lhs)._dist,
-                        dist(rhs) if self._discrete else dist(rhs)._dist)
-            loss = torch.mean(torch.maximum(value, free))
+                        dist(rhs) if self._discrete else dist(rhs)._dist)  # if discrete, dist is OneHotCategorical calss
+            loss = torch.mean(torch.maximum(value, free))  # value < freeならパラメータを更新しなくていい = hinge loss??
         else:
             value_lhs = value = kld(dist(lhs) if self._discrete else dist(lhs)._dist,
                                     dist(sg(rhs)) if self._discrete else dist(sg(rhs))._dist)
             value_rhs = kld(dist(sg(lhs)) if self._discrete else dist(sg(lhs))._dist,
                             dist(rhs) if self._discrete else dist(rhs)._dist)
-            loss_lhs = torch.maximum(torch.mean(value_lhs), torch.Tensor([free])[0])
-            loss_rhs = torch.maximum(torch.mean(value_rhs), torch.Tensor([free])[0])
+
+            # print(torch.Tensor([free])[0].requires_grad) False
+            # print(torch.mean(value_lhs)) torch.Size([])
+            loss_lhs = torch.maximum(torch.mean(value_lhs), torch.Tensor([free])[0])  # torch.Size([])
+            loss_rhs = torch.maximum(torch.mean(value_rhs), torch.Tensor([free])[0])  # torch.Size([])
+            # todo value_mean < freeならパラメータを更新しなくていい = hinge loss?? -> atariではない（free=0.0）
+
             loss = mix * loss_lhs + (1 - mix) * loss_rhs
         loss *= scale
         return loss, value
@@ -261,10 +293,10 @@ class ConvEncoder(nn.Module):
 
     def __call__(self, obs):
         x = obs['image'].reshape((-1,) + tuple(obs['image'].shape[-3:]))
-        x = x.permute(0, 3, 1, 2)
-        x = self.layers(x)
-        x = x.reshape([x.shape[0], np.prod(x.shape[1:])])
-        shape = list(obs['image'].shape[:-3]) + [x.shape[-1]]
+        x = x.permute(0, 3, 1, 2)  # (50*50, 3, 64, 64)
+        x = self.layers(x)  # (50*50, 256, 2, 2)
+        x = x.reshape([x.shape[0], np.prod(x.shape[1:])])  # (50*50, 1024)
+        shape = list(obs['image'].shape[:-3]) + [x.shape[-1]]  # (50, 50, 1024)
         return x.reshape(shape)
 
 

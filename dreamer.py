@@ -60,26 +60,31 @@ class Dreamer(nn.Module):
             greedy=lambda: self._task_behavior,
             random=lambda: expl.Random(config),
             plan2explore=lambda: expl.Plan2Explore(config, self._wm, reward),
-        )[config.expl_behavior]()
+        )[config.expl_behavior]()  # note always greedy
 
     def __call__(self, obs, reset, state=None, reward=None, training=True):
         step = self._step
         if self._should_reset(step):
             state = None
-        if state is not None and reset.any():
+
+        if state is not None and reset.any():  # todo what are these??
             mask = 1 - reset
             for key in state[0].keys():
                 for i in range(state[0][key].shape[0]):
                     state[0][key][i] *= mask[i]
             for i in range(len(state[1])):
                 state[1][i] *= mask[i]
-        if training and self._should_train(step):
+
+        if training and self._should_train(step):  # train if need
             steps = (
                 self._config.pretrain if self._should_pretrain()
-                else self._config.train_steps)
+                else self._config.train_steps
+            )  # int
+
             for _ in range(steps):
                 self._train(next(self._dataset))
-            if self._should_log(step):
+
+            if self._should_log(step):  # log if need
                 for name, values in self._metrics.items():
                     self._logger.scalar(name, float(np.mean(values)))
                     self._metrics[name] = []
@@ -87,41 +92,53 @@ class Dreamer(nn.Module):
                 self._logger.video('train_openl', to_np(openl))
                 self._logger.write(fps=True)
 
-        policy_output, state = self._policy(obs, state, training)
+        policy_output, state = self._policy(obs, state, training)  # todo get policy?
 
         if training:
             self._step += len(reset)
             self._logger.step = self._config.action_repeat * self._step
+
         return policy_output, state
 
     def _policy(self, obs, state, training):
         if state is None:
             batch_size = len(obs['image'])
-            latent = self._wm.dynamics.initial(len(obs['image']))
+            latent = self._wm.dynamics.initial(len(obs['image']))  # note contains mean std stoch deter
             action = torch.zeros((batch_size, self._config.num_actions)).to(self._config.device)
         else:
             latent, action = state
+
         embed = self._wm.encoder(self._wm.preprocess(obs))
+
         latent, _ = self._wm.dynamics.obs_step(
-            latent, action, embed, self._config.collect_dyn_sample)
-        if self._config.eval_state_mean:
+            latent, action, embed, self._config.collect_dyn_sample)  # latent = prior
+
+        if self._config.eval_state_mean:  # False
             latent['stoch'] = latent['mean']
-        feat = self._wm.dynamics.get_feat(latent)
+
+        feat = self._wm.dynamics.get_feat(latent)  # Tensors of cat of stoch and deter
+
+        # training is True
         if not training:
             actor = self._task_behavior.actor(feat)
             action = actor.mode()
-        elif self._should_expl(self._step):
-            actor = self._expl_behavior.actor(feat)
+        elif self._should_expl(self._step):  # always should explore
+            actor = self._expl_behavior.actor(feat)  # note =_task_behavior
             action = actor.sample()
         else:
             actor = self._task_behavior.actor(feat)
             action = actor.sample()
         logprob = actor.log_prob(action)
+
         latent = {k: v.detach() for k, v in latent.items()}
         action = action.detach()
-        if self._config.actor_dist == 'onehot_gumble':
+
+        if self._config.actor_dist == 'onehot_gumble':  # this means onehot gumbel technique
             action = torch.one_hot(torch.argmax(action, dim=-1), self._config.num_actions)
-        action = self._exploration(action, training)
+
+        action = self._exploration(action, training)  # note just returns the action
+        # todo what is this above???
+
         policy_output = {'action': action, 'logprob': logprob}
         state = (latent, action)
         return policy_output, state
@@ -138,22 +155,32 @@ class Dreamer(nn.Module):
         raise NotImplementedError(self._config.action_noise)
 
     def _train(self, data):
+        # data: Dict
+        # keys: dict_keys(['orientations', 'height', 'velocity', 'image', 'reward', 'discount', 'action', 'logprob'])
+        # print(data["orientations"].shape)  # (50, 50, 14) -> batch_size * batch_length
+        # print(data["height"].shape)  # (50, 50)
+
         metrics = {}
         post, context, mets = self._wm._train(data)
+
         metrics.update(mets)
         start = post
         if self._config.pred_discount:  # Last step could be terminal.
             start = {k: v[:, :-1] for k, v in post.items()}
             context = {k: v[:, :-1] for k, v in context.items()}
+
         reward = lambda f, s, a: self._wm.heads['reward'](
             self._wm.dynamics.get_feat(s)).mode()
-        metrics.update(self._task_behavior._train(start, reward)[-1])
-        if self._config.expl_behavior != 'greedy':
+
+        metrics.update(self._task_behavior._train(start, reward)[-1])  # train ppo agent
+
+        if self._config.expl_behavior != 'greedy':  # if not greedy, then train something
             if self._config.pred_discount:
                 data = {k: v[:, :-1] for k, v in data.items()}
             mets = self._expl_behavior.train(start, context, data)[-1]
             metrics.update({'expl_' + key: value for key, value in mets.items()})
-        for name, value in metrics.items():
+
+        for name, value in metrics.items():  # store metrics into self._metrics
             if not name in self._metrics.keys():
                 self._metrics[name] = [value]
             else:
@@ -165,7 +192,7 @@ def count_steps(folder):
     # 501 - 1 = 500 * file_num
 
 
-def make_dataset(episodes, config):
+def make_dataset(episodes, config):  # important!!!!
     generator = tools.sample_episodes(
         episodes, config.batch_length, config.oversample_ends)
     dataset = tools.from_generator(generator, config.batch_size)
@@ -231,6 +258,7 @@ def process_episode(config, logger, mode, train_eps, eval_eps, episode):
 
 
 def main(config):
+    # print(type(config))
     logdir = pathlib.Path(config.logdir).expanduser()
     config.traindir = config.traindir or logdir / 'train_eps'
     config.evaldir = config.evaldir or logdir / 'eval_eps'
@@ -294,10 +322,12 @@ def main(config):
         logger.step = config.action_repeat * count_steps(config.traindir)
 
     print('Simulate agent.')
-    train_dataset = make_dataset(train_eps, config)
+    train_dataset = make_dataset(train_eps, config)  # <class 'generator'>
     eval_dataset = make_dataset(eval_eps, config)
+
     agent = Dreamer(config, logger, train_dataset).to(config.device)  # config.device
     agent.requires_grad_(requires_grad=False)
+
     if (logdir / 'latest_model.pt').exists():
         agent.load_state_dict(torch.load(logdir / 'latest_model.pt'))
         agent._should_pretrain._once = False
@@ -305,11 +335,13 @@ def main(config):
     state = None
     while agent._step < config.steps:
         logger.write()
+
         print('Start evaluation.')
         video_pred = agent._wm.video_pred(next(eval_dataset))
         logger.video('eval_openl', to_np(video_pred))
         eval_policy = functools.partial(agent, training=False)
         tools.simulate(eval_policy, eval_envs, episodes=1)
+
         print('Start training.')
         state = tools.simulate(agent, train_envs, config.eval_every, state=state)
         torch.save(agent.state_dict(), logdir / 'latest_model.pt')
